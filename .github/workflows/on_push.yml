@@ -1,0 +1,30 @@
+name: Test PyHercControl
+
+on: [push]
+
+jobs:
+
+# Test the tool
+  test:
+    name: Test
+    runs-on: [ubuntu-latest]
+    # container: rosspatterson/vm370:builder
+    services:
+      vm370:
+        image: rosspatterson/vm370:latest
+        ports:
+          - 8038:8038
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+    
+      - name: Run tests
+        run: |
+          chmod +x PyHercControl/src/herccontrol PyHercControl/tests/basictest.sh
+          cp PyHercControl/src/herccontrol .
+          ./herccontrol -v
+          ./herccontrol -h
+          ./PyHercControl/tests/basictest.sh
+        shell: bash
