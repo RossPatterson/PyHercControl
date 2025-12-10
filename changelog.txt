@@ -1,0 +1,4 @@
+hercctl.py change log
+=====================
+1.0.0 - First version, based on https://github.com/adesutherland/HercControl,
+        simplified and rewritten in Python with no dependencies.

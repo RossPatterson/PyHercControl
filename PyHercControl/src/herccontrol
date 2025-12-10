@@ -1,0 +1,430 @@
+#!/usr/bin/env python
+
+# ----------------------------------------------------------------------------#
+# This is free and unencumbered software released into the public domain.     #
+#                                                                             #
+# Anyone is free to copy, modify, publish, use, compile, sell, or distribute  #
+# this software, either in source code form or as a compiled binary, for any  #
+# purpose, commercial or non-commercial, and by any means.                    #
+#                                                                             #
+# In jurisdictions that recognize copyright laws, the author or authors of    #
+# this software dedicate any and all copyright interest in the software to    #
+# the public domain. We make this dedication for the benefitof the public at  #
+# large and to the detriment of our heirs and successors. We intend this      #
+# dedication to be an overt act of relinquishment in perpetuity of all        #
+# present and future rights to this software under copyright law.             #
+#                                                                             #
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR  #
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,    #
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE #
+# AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN  #
+# ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN           #
+# CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.  #
+#                                                                             #
+# For more information, please refer to <https://unlicense.org>               #
+# ----------------------------------------------------------------------------#
+
+import argparse
+import datetime
+import os
+import re
+import time
+import urllib.parse
+import urllib.request
+
+arg_is_set = set()  # for IsStored argparse action
+version: str = "1.1.2"
+
+
+# -----------------------------------------------------------------------------
+# This class is based on https://stackoverflow.com/a/65020739 by Askold Ilvento
+# as of 2025-11-11.
+# License: CC BY-SA 4.0
+class IsStored(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        arg_is_set.add(self.dest)
+        setattr(namespace, self.dest + "_set", True)
+        if self.dest == "debug":
+            setattr(namespace, self.dest, values if len(values) > 0 else True)
+        elif self.dest == "timeout":
+            setattr(namespace, self.dest, values if values else self.default)
+        elif self.dest == "url":
+            setattr(namespace, self.dest, values if values else self.default)
+
+
+# -----------------------------------------------------------------------------
+
+
+def control_hercules(
+    _command: str,
+    _debug: bool,
+    _from_mark: str,
+    _host_port: str,
+    _hercules_version: int,
+    _max_between_marks: int,
+    _max_console_size: int,
+    _polling_time: float,
+    _quiet: bool,
+    _set_mark: bool,
+    _single: bool,
+    _start_history_size: int,
+    _timeout: int,
+    _wait_for_regex: re.Pattern,
+):
+
+    global console_size_needed
+    global debug
+    global hercules_version
+    global host_port
+    global marker_num
+    global polling_time
+    global timeout
+
+    console_size_needed = _start_history_size
+    debug = _debug
+    hercules_version = _hercules_version
+    host_port = _host_port
+    marker: str = ""
+    polling_time = _polling_time
+    marker_num = 0
+    new_marker: str = ""
+    timeout_extension: datetime.timedelta = datetime.timedelta(seconds=_timeout)
+    timeout = datetime.datetime.now() + timeout_extension
+    transcript: list(str) = []
+    trying_to_remark: bool = False
+
+    if debug:
+        print(f"Version: PyHercControl {version}")
+        print(f"Command: {_command}")
+        print(f"Wait for: {_wait_for_regex.pattern if _wait_for_regex else ''}")
+        print(f"Host: {host_port}")
+        print(f"Timeout/sec: {_timeout}")
+        print(f"Start History Size/lines: {_start_history_size}")
+        print(f"Polling Time/ms: {polling_time}")
+        print(f"Max Console Size/lines: {_max_console_size}")
+        print(f"Max Console Between Marks/lines: {_max_between_marks}")
+        print(f"Hercules version: {hercules_version}")
+
+    if _set_mark:
+        if _command != "" or _wait_for_regex is not None:
+            raise ex_error("-m cannot be used with a command or -w regex")
+        print(mark_console())
+        exit(0)
+
+    if not _wait_for_regex:
+        issue_cmd(_command)
+        exit(0)
+
+    lines = []
+    try:
+        if _from_mark:
+            marker = _from_mark
+        else:
+            marker = mark_console()
+        if _command != "":
+            issue_cmd(_command)
+        prev_lines_size = -1
+        while datetime.datetime.now() < timeout:
+            time.sleep(polling_time)
+            try:
+                lines = collect_console()
+            except urllib.error.URLError:
+                continue  # Keep retrying until timeout
+            # Find the current marker, and discard it and lines before it.
+            found_marker = False
+            for i, line in enumerate(lines):
+                if marker in line:
+                    lines = lines[(i + 1) :]  # Everything after the marker, or [].
+                    found_marker = True
+                    break
+            # If there was some new output, restart the deadman timer.
+            if len(lines) != prev_lines_size:
+                if debug:
+                    print(f"Timeout reset because linecount changed from {prev_lines_size} to {len(lines)}")
+                timeout = datetime.datetime.now() + timeout_extension
+                prev_lines_size = len(lines)
+            # If we didn't find the marker, go get a larger console snippet.
+            if not found_marker:
+                console_size_needed *= 2
+                if debug:
+                    print(
+                        f"History extended to {console_size_needed} because marker not found."
+                    )
+                continue
+            # Remark periodically, so the snippets don't get too large.
+            if trying_to_remark:
+                # Find the new marker after the current marker
+                for i, line in enumerate(lines):
+                    if new_marker in line:
+                        break
+                else:
+                    console_size_needed *= 2
+                    print("History extended to {console_size_needed} for remarking")
+                    continue
+                # Add everything between the old and new markers to the results
+                # and reset for reading from the new marker.
+                transcript += lines[:i]
+                marker = new_marker
+                console_size_needed = _start_history_size
+                prev_lines_size = -1
+                trying_to_remark = False
+                if debug:
+                    print("Remarking complete")
+                continue
+            # Have we found the terminator?
+            if len(lines) > 1:
+                for i, line in enumerate(lines):
+                    if _wait_for_regex and _wait_for_regex.search(line):
+                        lines = lines[: (i + 1)]
+                        raise ex_found(f"{i:03d}: {line}")
+            if len(lines) > _max_between_marks:
+                if debug:
+                    print("Trying to remark")
+                new_marker = mark_console()
+                trying_to_remark = True
+                continue
+        raise ex_error(f"timed out waiting for '{_wait_for_regex.pattern}'")
+    except ex_found as e:
+        if debug:
+            print(f"Wait-for found in line {str(e)}")
+    except ex_error as e:
+        print(f"ERROR: {str(e)}")
+        exit(1)
+    finally:
+        transcript += lines
+        if _single:
+            print(transcript[-1])
+        elif not _quiet:
+            print("\n".join(transcript))
+
+
+def issue_cmd(command: str) -> [str]:
+    """
+    Issue a command to Hercules and return as much of the Hercules syslog as we
+    can get.
+    """
+
+    lines = []
+    in_PRE = False
+    url = f"http://{host_port}/cgi-bin/tasks/syslog?msgcount={console_size_needed}&command={urllib.parse.quote(command, safe='')}"
+    if debug:
+        print(f"Command: {url}")
+    while datetime.datetime.now() < timeout:
+        try:
+            with urllib.request.urlopen(url) as f:
+                if f.status != 200:
+                    raise ex_error(f"Error {f.status} from Hercules.")
+                for line in f.readlines():
+                    line = line.decode("utf-8")
+                    if hercules_version == 4 and line[0] == "/":
+                        line = line[1:]
+                    line = line.strip(" \n\r\t\a\b\f\v")
+                    if in_PRE:
+                        if line.endswith("</PRE>"):
+                            in_PRE = False
+                        else:
+                            lines.append(line)
+                    elif line.startswith("<PRE>"):
+                        in_PRE = True
+            break
+        except urllib.error.URLError as e:
+            if debug:
+                print(f"{datetime.datetime.now()} URLError: {str(e)}")
+        except Exception as e:
+            if debug:
+                print(f"{datetime.datetime.now()} Exception: {str(e)}")
+            raise
+        time.sleep(polling_time)
+    if debug:
+        if len(lines) == 0:
+            print("No lines captured from console")
+        else:
+            print("Lines captured from console:")
+            for i, line in enumerate(lines):
+                print(f"    {i:06d}: {line}")
+    return lines
+
+
+def mark_console() -> str:
+    """
+    Create a marker in the format "yyyy-mm-dd_hh:mm:ss.uuuuuu#nnnn", insert
+    it at the end of the Hercules syslog, and return it.
+    """
+    global marker_num
+
+    marker_num += 1
+    marker = f"MaRkEr {datetime.datetime.now():%Y-%m-%d_%H:%M:%S.%f}#{marker_num:04d}"
+    lines = issue_cmd(f"* {marker}")
+    i = 0
+    for i, line in enumerate(lines):
+        if marker in line:
+            break
+    else:
+        raise ex_error(f"mark_console(): Marker '{marker}' not found after set.")
+    return marker
+
+
+def collect_console() -> [str]:
+    """
+    Obtain as much of the Hercules syslog as we can get.
+    """
+    return issue_cmd("")
+
+
+class ex_error(Exception):
+    pass
+
+
+class ex_found(Exception):
+    pass
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Tool to send commands to Hercules")
+    parser.add_argument(
+        "command",
+        default="",
+        nargs="?",
+        help="The command to send to Hercules",
+    )
+    parser.add_argument(
+        "-C",
+        "--max-console-size",
+        "--maxconsolesize",
+        default=20,
+        type=int,
+        metavar="LINES",
+        help="Max Console Size, default: %(default)s",
+    )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        default=False,
+        action=IsStored,
+        nargs=0,
+        type=bool,
+        help="Debug mode (or HC_DEBUG=bool)",
+    )
+    parser.add_argument(
+        "-f",
+        "--from-mark",
+        "--frommark",
+        default=None,
+        metavar="MARKER",
+        help="Search log from mark point (returned from %(prog)s -m)",
+    )
+    parser.add_argument(
+        "-H",
+        "--hercules-version",
+        choices=[3, 4],
+        default=3,
+        action=IsStored,
+        type=int,
+        help="Version of Hercules, default: %(default)s",
+    )
+    parser.add_argument(
+        "-m",
+        "--mark",
+        action="store_true",
+        default=False,
+        help="Set and output mark point (to be used in %(prog)s -f)",
+    )
+    parser.add_argument(
+        "-M",
+        "--max-between-marks",
+        default=50,
+        type=int,
+        metavar="LINES",
+        help="Max console size between marks, default: %(default)s",
+    )
+    parser.add_argument(
+        "-P",
+        "--polling-time",
+        "--pollingtime",
+        default=250,
+        type=int,
+        metavar="MILLISECONDS",
+        help="Polling Time, default: %(default)s",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Quiet mode (no output)",
+    )
+    parser.add_argument(
+        "-s",
+        "--single",
+        action="store_true",
+        default=False,
+        help="Single mode (only output last line)",
+    )
+    parser.add_argument(
+        "-S",
+        "--start-history-size",
+        "--starthistorysize",
+        default=20,
+        type=int,
+        metavar="LINES",
+        help="Start History Size, default: %(default)s",
+    )
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        default=30,
+        type=int,
+        action=IsStored,
+        metavar="SECONDS",
+        help="Timeout (or HC_TIMEOUT=seconds), default: %(default)s",
+    )
+    parser.add_argument(
+        "-u",
+        "--url",
+        default="127.0.0.1:8038",
+        action=IsStored,
+        metavar="HOST[:PORT]",
+        help="Hostname and port (or HC_HOSTURL='host[:port]'), default: %(default)s",
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version="PyHercControl " + version,
+        help="Show the version and exit.",
+    )
+    parser.add_argument(
+        "-w",
+        "--wait-for",
+        "--waitfor",
+        default="",
+        metavar="REGEX",
+        help="The regex string we are waiting for",
+    )
+    args = parser.parse_args()
+    if "debug_set" not in args:
+        args.debug = os.environ.get("HC_DEBUG", "FALSE").upper() == "TRUE"
+    if "timeout_set" not in args:
+        args.timeout = int(os.environ.get("HC_TIMEOUT", 30))
+    if "url_set" not in args:
+        args.url = os.environ.get("HC_HOSTURL", "127.0.0.1:8038")
+    if "hercules_version_set" not in args:
+        args.hercules_version = int(os.environ.get("HC_VERSION", 3))
+
+    rc = control_hercules(
+        args.command,
+        args.debug,
+        args.from_mark,
+        args.url,
+        args.hercules_version,
+        args.max_between_marks,
+        args.max_console_size,
+        args.polling_time / 1000,
+        args.quiet,
+        args.mark,
+        args.single,
+        args.start_history_size,
+        args.timeout,
+        re.compile(args.wait_for) if args.wait_for != "" else None,
+    )
+    exit(rc)
