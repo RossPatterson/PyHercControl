@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 
 arg_is_set = set()  # for IsStored argparse action
-version: str = "1.1.2"
+version: str = "1.1.3"
 
 
 # -----------------------------------------------------------------------------
@@ -221,8 +221,9 @@ def issue_cmd(command: str) -> [str]:
                     line = line.strip(" \n\r\t\a\b\f\v")
                     if in_PRE:
                         if line.endswith("</PRE>"):
+                            line = line.replace("</PRE>", "")
                             in_PRE = False
-                        else:
+                        if len(line) > 0:
                             lines.append(line)
                     elif line.startswith("<PRE>"):
                         in_PRE = True
