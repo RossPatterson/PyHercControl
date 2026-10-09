@@ -1,9 +1,10 @@
 PyHercControl change log
 ========================
+I0002 - Remove blanks from the marker token, to prevent shell script errors.
+
 1.1.3 - 2026-04-15
 I0001 - --waitfor can't find text in line that doesn't end with \n
 
 1.1.2 - 2025-12-10
-      - First version, based on https://github.com/RossPatterson/HercControl
-        , release 1.1.2, simplified and rewritten in Python with no
-        dependencies.
+      - First version, based on https://github.com/RossPatterson/HercControl,
+        release 1.1.2, simplified and rewritten in Python with no dependencies.

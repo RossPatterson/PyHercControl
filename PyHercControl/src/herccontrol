@@ -248,13 +248,13 @@ def issue_cmd(command: str) -> [str]:
 
 def mark_console() -> str:
     """
-    Create a marker in the format "yyyy-mm-dd_hh:mm:ss.uuuuuu#nnnn", insert
+    Create a marker in the format "MaRkEr_yyyy-mm-dd_hh:mm:ss.uuuuuu#nnnn", insert
     it at the end of the Hercules syslog, and return it.
     """
     global marker_num
 
     marker_num += 1
-    marker = f"MaRkEr {datetime.datetime.now():%Y-%m-%d_%H:%M:%S.%f}#{marker_num:04d}"
+    marker = f"MaRkEr_{datetime.datetime.now():%Y-%m-%d_%H:%M:%S.%f}#{marker_num:04d}"
     lines = issue_cmd(f"* {marker}")
     i = 0
     for i, line in enumerate(lines):
